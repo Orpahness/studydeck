@@ -1,0 +1,212 @@
+// Shared flows: importing files as notes / library books, and the
+// "Generate flashcards / quiz / exam" dialog used all over the app.
+import { db, files, auth } from './store.js';
+import { extractText, ACCEPT } from './extract.js';
+import { makeFlashcards, makeQuestions, autoTitle, autoTags, detectSubject } from './generator.js';
+import { state, ensureFolder, go, updateDueCount } from './app.js';
+import { esc, icon, modal, toast, fmtBytes } from './util.js';
+
+export { ACCEPT };
+export const plain = (t) => (t || '').replace(/\f/g, '\n\n');
+
+export function pickFiles({ multiple = true, accept = ACCEPT } = {}) {
+  return new Promise((resolve) => {
+    const i = document.createElement('input');
+    i.type = 'file'; i.accept = accept; i.multiple = multiple;
+    i.onchange = () => resolve([...i.files]);
+    i.click();
+  });
+}
+
+export function bindDropzone(el, onFiles) {
+  el.addEventListener('click', async () => { const f = await pickFiles(); if (f.length) onFiles(f); });
+  el.addEventListener('dragover', (e) => { e.preventDefault(); el.classList.add('over'); });
+  el.addEventListener('dragleave', () => el.classList.remove('over'));
+  el.addEventListener('drop', (e) => { e.preventDefault(); el.classList.remove('over'); if (e.dataTransfer.files.length) onFiles([...e.dataTransfer.files]); });
+  el.setAttribute('role', 'button'); el.tabIndex = 0;
+  el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); el.click(); } });
+}
+
+function progressModal(title) {
+  const m = modal({ title, body: `<div class="stack"><p class="small muted" id="pm-txt">Starting…</p><div class="bar-progress"><i id="pm-bar" style="width:0%"></i></div></div>` });
+  return {
+    set(txt, frac) { m.el.querySelector('#pm-txt').textContent = txt; if (frac != null) m.el.querySelector('#pm-bar').style.width = `${Math.round(frac * 100)}%`; },
+    close: m.close,
+  };
+}
+
+/** Upload files as editable notes: text extracted, titled, tagged and filed by subject automatically. */
+export async function importAsNotes(fileList) {
+  const pm = progressModal('Importing notes');
+  const made = [];
+  for (const [i, f] of fileList.entries()) {
+    try {
+      pm.set(`Reading ${f.name}…`, i / fileList.length);
+      const { text } = await extractText(f, (p) => pm.set(`Reading ${f.name}… ${Math.round(p * 100)}%`, (i + p) / fileList.length));
+      const content = plain(text);
+      if (!content.trim()) { toast(`${f.name}: no readable text (scanned image?)`, 'err'); continue; }
+      const folder_id = await ensureFolder(detectSubject(content));
+      made.push(await db.insert('notes', {
+        title: autoTitle(content, f.name.replace(/\.[^.]+$/, '')), content, tags: autoTags(content), folder_id, source_name: f.name,
+      }));
+    } catch (e) { toast(`${f.name}: ${e.message}`, 'err'); }
+  }
+  pm.close();
+  if (made.length) toast(`Saved ${made.length} note${made.length > 1 ? 's' : ''} and sorted by subject`, 'ok');
+  return made;
+}
+
+/** Upload books / PDFs to the library: keeps the original file + extracted text. */
+export async function importToLibrary(fileList) {
+  const pm = progressModal('Adding to library');
+  const made = [];
+  for (const [i, f] of fileList.entries()) {
+    try {
+      if (f.size > 50 * 1024 * 1024) { toast(`${f.name} is over 50 MB`, 'err'); continue; }
+      pm.set(`Reading ${f.name} (${fmtBytes(f.size)})…`, i / fileList.length);
+      const { text, pages } = await extractText(f, (p) => pm.set(`Reading ${f.name}… page ${Math.round(p * 100)}%`, (i + p * 0.8) / fileList.length));
+      pm.set(`Saving ${f.name}…`, (i + 0.9) / fileList.length);
+      const path = files.path(f.name);
+      await files.upload(path, f);
+      const folder_id = await ensureFolder(detectSubject(plain(text)));
+      made.push(await db.insert('documents', {
+        title: f.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '), file_path: path, file_type: f.type || f.name.split('.').pop(),
+        size_bytes: f.size, page_count: pages, text_content: text, folder_id,
+      }));
+      if (!plain(text).trim()) toast(`${f.name}: saved, but it has no text layer (scanned). Questions can't be generated from it.`, 'err');
+    } catch (e) { toast(`${f.name}: ${e.message}`, 'err'); }
+  }
+  pm.close();
+  if (made.length) toast(`Added ${made.length} file${made.length > 1 ? 's' : ''} to your library`, 'ok');
+  return made;
+}
+
+async function aiGenerate(text, kind, count, types) {
+  const token = await auth.accessToken();
+  const r = await fetch('/api/generate', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ text, kind, count, types }) });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `AI request failed (${r.status})`);
+  return j;
+}
+
+/**
+ * The generate dialog.
+ * @param {{text:string, title:string, folder_id?:string, source?:string, pages?:number, defaultKind?:'cards'|'quiz'|'exam'}} src
+ */
+export function openGenerator(src) {
+  const rawText = src.text || '';
+  if (plain(rawText).trim().length < 60) { toast('Add more text first — there isn\'t enough to build questions from.', 'err'); return; }
+  const kind0 = src.defaultKind || 'cards';
+  const pageCount = (rawText.match(/\f/g) || []).length + 1;
+  const m = modal({
+    title: 'Create study material', wide: true,
+    body: `<form id="gen">
+      <p class="small muted" style="margin-bottom:14px">From: <b style="color:var(--text)">${esc(src.title)}</b></p>
+      <div class="radio-cards">
+        <label><input type="radio" name="kind" value="cards" ${kind0 === 'cards' ? 'checked' : ''}>${icon('cards')}Flashcards<small>Flip cards with spaced review</small></label>
+        <label><input type="radio" name="kind" value="quiz" ${kind0 === 'quiz' ? 'checked' : ''}>${icon('quiz')}Quiz<small>Instant feedback per question</small></label>
+        <label><input type="radio" name="kind" value="exam" ${kind0 === 'exam' ? 'checked' : ''}>${icon('clock')}Exam<small>Timed, results at the end</small></label>
+      </div>
+      <label class="field"><span>Title</span><input name="title" value="${esc(src.title)}" required></label>
+      <div class="row gap wrap">
+        <label class="field grow"><span>How many?</span><input name="count" type="number" min="3" max="100" value="${kind0 === 'exam' ? 30 : 15}"></label>
+        <label class="field grow q-only"><span>Time limit (minutes, exam)</span><input name="time" type="number" min="0" max="300" value="30"></label>
+        ${pageCount > 1 ? `<label class="field grow"><span>Pages (of ${pageCount})</span><input name="pages" placeholder="e.g. 1-20 (blank = all)"></label>` : ''}
+      </div>
+      <div class="field q-only"><span>Question types</span><div class="check-row">
+        <label><input type="checkbox" name="types" value="mcq" checked> Multiple choice</label>
+        <label><input type="checkbox" name="types" value="tf" checked> True / False</label>
+        <label><input type="checkbox" name="types" value="fill" checked> Fill in the blank</label>
+        <label><input type="checkbox" name="types" value="short"> Short answer (self-checked)</label>
+      </div></div>
+      ${state.aiEnabled ? `<div class="field"><span>Generator</span><div class="check-row">
+        <label><input type="radio" name="engine" value="local" checked> Built-in (instant, private)</label>
+        <label><input type="radio" name="engine" value="ai"> AI (smarter, sends this text to the AI service)</label></div></div>` : ''}
+      <div class="row end gap" style="margin-top:6px"><button type="button" class="btn ghost" data-close>Cancel</button><button class="btn primary" id="gen-go">${icon('sparkle')} Generate</button></div>
+    </form>`,
+  });
+  const form = m.el.querySelector('#gen');
+  const sync = () => {
+    const k = form.kind.value;
+    m.el.querySelectorAll('.q-only').forEach((el) => { el.style.display = k === 'cards' ? 'none' : ''; });
+    form.time.closest('.field').style.display = k === 'exam' ? '' : 'none';
+  };
+  form.addEventListener('change', (e) => {
+    if (e.target.name === 'kind') form.count.value = e.target.value === 'exam' ? 30 : 15;
+    sync();
+  });
+  sync();
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = m.el.querySelector('#gen-go');
+    btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Generating…';
+    try {
+      const kind = form.kind.value;
+      const count = Math.max(3, Math.min(100, Number(form.count.value) || 15));
+      const types = [...form.querySelectorAll('[name=types]:checked')].map((x) => x.value);
+      if (kind !== 'cards' && !types.length) throw new Error('Pick at least one question type');
+      let text = rawText;
+      const pr = form.pages?.value.trim();
+      if (pr) {
+        const [a, b] = pr.split(/\s*[-–]\s*/).map(Number);
+        const pages = rawText.split('\f');
+        text = pages.slice(Math.max(0, (a || 1) - 1), Math.min(pages.length, b || a || pages.length)).join('\n\n');
+      }
+      text = plain(text);
+      const useAI = form.engine?.value === 'ai';
+      const title = form.title.value.trim() || src.title;
+      if (kind === 'cards') {
+        let cards = useAI ? (await aiGenerate(text, 'cards', count)).cards : makeFlashcards(text, { max: count });
+        cards = (cards || []).filter((c) => c.front && c.back);
+        if (!cards.length) throw new Error('Couldn\'t find clear facts or definitions. Try a different section, or add cards by hand.');
+        const deck = await db.insert('decks', { title, folder_id: src.folder_id || null, source_label: src.source || src.title });
+        await db.insert('cards', cards.map((c) => ({ deck_id: deck.id, front: String(c.front).slice(0, 2000), back: String(c.back).slice(0, 4000) })));
+        m.close(); toast(`Made ${cards.length} flashcards`, 'ok'); updateDueCount();
+        go(`#/decks/${deck.id}`);
+      } else {
+        let qs = useAI ? (await aiGenerate(text, kind, count, types)).questions : makeQuestions(text, { count, types });
+        qs = (qs || []).filter((q) => q.prompt && q.answer != null).map((q, i) => ({ id: q.id || `q${Date.now().toString(36)}${i}`, ...q, answer: String(q.answer) }));
+        if (qs.length < 3) throw new Error('Not enough material for questions here. Try more text or other question types.');
+        const quiz = await db.insert('quizzes', { title, kind, questions: qs, time_limit_min: kind === 'exam' ? Number(form.time.value) || null : null, folder_id: src.folder_id || null, source_label: src.source || src.title });
+        m.close(); toast(`${kind === 'exam' ? 'Exam' : 'Quiz'} ready — ${qs.length} questions`, 'ok');
+        go(`#/quiz/${quiz.id}`);
+      }
+    } catch (err) {
+      toast(err.message, 'err');
+      btn.disabled = false; btn.innerHTML = `${icon('sparkle')} Generate`;
+    }
+  });
+}
+
+/** Dialog to choose what to generate from: a note, a library book, a new upload, or pasted text. */
+export async function openSourcePicker(defaultKind = 'cards') {
+  const [notes, docs] = await Promise.all([db.list('notes', { select: 'id,title,folder_id', order: 'updated_at', desc: true }), db.list('documents', { select: 'id,title,folder_id,page_count', order: 'created_at', desc: true })]);
+  const m = modal({
+    title: 'What do you want to study?', wide: true,
+    body: `<div class="stack">
+      <div class="dropzone" id="sp-drop">${icon('upload')}<div><b>Upload a file</b> — PDF, Word, PowerPoint or text</div><div class="tiny">It's saved to your library first</div></div>
+      ${docs.length || notes.length ? `<label class="field"><span>…or pick something you already have</span><select id="sp-sel"><option value="">Choose a note or book</option>
+        ${docs.length ? `<optgroup label="Library">${docs.map((d) => `<option value="d:${d.id}">${esc(d.title)}${d.page_count ? ` (${d.page_count} pages)` : ''}</option>`).join('')}</optgroup>` : ''}
+        ${notes.length ? `<optgroup label="Notes">${notes.map((n) => `<option value="n:${n.id}">${esc(n.title)}</option>`).join('')}</optgroup>` : ''}
+      </select></label>` : ''}
+      <label class="field"><span>…or paste text</span><textarea class="textarea" id="sp-text" rows="5" placeholder="Paste a chapter, lecture notes, a glossary…"></textarea></label>
+      <div class="row end gap"><button class="btn ghost" data-close>Cancel</button><button class="btn primary" id="sp-go">Continue</button></div></div>`,
+  });
+  const next = (src) => { m.close(); setTimeout(() => openGenerator({ ...src, defaultKind }), 180); };
+  bindDropzone(m.el.querySelector('#sp-drop'), async (fl) => {
+    m.close();
+    const made = await importToLibrary(fl.slice(0, 1));
+    if (made[0]) openGenerator({ text: made[0].text_content, title: made[0].title, folder_id: made[0].folder_id, source: made[0].title, defaultKind });
+  });
+  m.el.querySelector('#sp-go').addEventListener('click', async () => {
+    const sel = m.el.querySelector('#sp-sel')?.value;
+    const pasted = m.el.querySelector('#sp-text').value.trim();
+    if (sel) {
+      const [t, id] = sel.split(':');
+      const row = await db.get(t === 'd' ? 'documents' : 'notes', id);
+      return next({ text: t === 'd' ? row.text_content : row.content, title: row.title, folder_id: row.folder_id, source: row.title });
+    }
+    if (pasted) return next({ text: pasted, title: autoTitle(pasted, 'Pasted text'), source: 'Pasted text' });
+    toast('Upload, pick, or paste something first', 'err');
+  });
+}

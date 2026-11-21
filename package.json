@@ -1,0 +1,11 @@
+{
+  "name": "studydeck",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Study dashboard: notes, flashcards, PDF-to-quiz generator and progress tracking. Static site + Supabase.",
+  "type": "module",
+  "scripts": {
+    "dev": "npx serve -l 3000 ."
+  },
+  "engines": { "node": ">=18" }
+}
