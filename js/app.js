@@ -1,5 +1,5 @@
 import { auth, db } from './store.js';
-import { $, $$, esc, icon, toast, fmtDate, modal } from './util.js';
+import { $, $$, esc, icon, toast, fmtDate, modal, promptBox } from './util.js';
 import { APP_NAME } from './config.js';
 
 export const state = { profile: null, folders: [], cleanup: [], aiEnabled: false };
@@ -10,6 +10,7 @@ const ROUTES = {
   library: { view: 'library', title: 'Library', nav: 'library' },
   decks: { view: 'decks', title: 'Flashcards', nav: 'decks' },
   study: { view: 'study', title: 'Study session', nav: 'decks' },
+  learn: { view: 'learn', title: 'Learn', nav: 'decks' },
   quizzes: { view: 'quizzes', title: 'Quizzes & exams', nav: 'quizzes' },
   quiz: { view: 'take', title: 'Quiz', nav: 'quizzes' },
   progress: { view: 'progress', title: 'Progress', nav: 'progress' },
@@ -28,6 +29,35 @@ export const go = (h) => { if (location.hash === h) route(); else location.hash 
 export function setCrumb(text) { const el = $('#crumb-page'); if (el) el.textContent = text; }
 export async function refreshFolders() { state.folders = await db.list('folders', { order: 'name' }); return state.folders; }
 export function folderById(id) { return state.folders.find((f) => f.id === id); }
+/** The subject chosen under "Studying" on the dashboard (null = all subjects). */
+export const focusId = () => (state.profile?.focus_folder_id && folderById(state.profile.focus_folder_id) ? state.profile.focus_folder_id : null);
+export async function setFocus(id) {
+  state.profile = await db.saveProfile({ focus_folder_id: id || null });
+}
+
+/** <select> of subjects with a "+ New subject…" entry; pair with bindSubjectSelect. */
+export function subjectSelectHtml(selected, { id = 'subject', allLabel = 'No subject', cls = 'input' } = {}) {
+  return `<select class="${cls}" id="${id}" name="${id}">
+    <option value="">${allLabel}</option>
+    ${state.folders.map((f) => `<option value="${f.id}" ${f.id === selected ? 'selected' : ''}>${esc(f.name)}</option>`).join('')}
+    <option value="__new">+ New subject…</option></select>`;
+}
+export function bindSubjectSelect(sel, onChange) {
+  let prev = sel.value;
+  sel.addEventListener('change', async () => {
+    if (sel.value === '__new') {
+      const name = await promptBox({ title: 'New subject', label: 'Subject name (e.g. Biology 101)', confirmText: 'Add' });
+      if (!name) { sel.value = prev; return; }
+      const fid = await ensureFolder(name);
+      const opt = new Option(name, fid, true, true);
+      sel.insertBefore(opt, sel.querySelector('option[value="__new"]'));
+      sel.value = fid;
+    }
+    prev = sel.value;
+    onChange?.(sel.value || null);
+  });
+}
+
 export async function ensureFolder(name) {
   if (!name) return null;
   const hit = state.folders.find((f) => f.name.toLowerCase() === name.toLowerCase());

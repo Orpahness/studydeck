@@ -3,7 +3,7 @@
 import { db, files, auth } from './store.js';
 import { extractText, ACCEPT } from './extract.js';
 import { makeFlashcards, makeQuestions, autoTitle, autoTags, detectSubject } from './generator.js';
-import { state, ensureFolder, go, updateDueCount } from './app.js';
+import { state, ensureFolder, go, updateDueCount, focusId, subjectSelectHtml, bindSubjectSelect } from './app.js';
 import { esc, icon, modal, toast, fmtBytes } from './util.js';
 
 export { ACCEPT };
@@ -45,14 +45,14 @@ export async function importAsNotes(fileList) {
       const { text } = await extractText(f, (p) => pm.set(`Reading ${f.name}… ${Math.round(p * 100)}%`, (i + p) / fileList.length));
       const content = plain(text);
       if (!content.trim()) { toast(`${f.name}: no readable text (scanned image?)`, 'err'); continue; }
-      const folder_id = await ensureFolder(detectSubject(content));
+      const folder_id = focusId() || await ensureFolder(detectSubject(content));
       made.push(await db.insert('notes', {
         title: autoTitle(content, f.name.replace(/\.[^.]+$/, '')), content, tags: autoTags(content), folder_id, source_name: f.name,
       }));
     } catch (e) { toast(`${f.name}: ${e.message}`, 'err'); }
   }
   pm.close();
-  if (made.length) toast(`Saved ${made.length} note${made.length > 1 ? 's' : ''} and sorted by subject`, 'ok');
+  if (made.length) toast(`Saved ${made.length} note${made.length > 1 ? 's' : ''}${focusId() ? '' : ' and sorted by subject'}`, 'ok');
   return made;
 }
 
@@ -68,7 +68,7 @@ export async function importToLibrary(fileList) {
       pm.set(`Saving ${f.name}…`, (i + 0.9) / fileList.length);
       const path = files.path(f.name);
       await files.upload(path, f);
-      const folder_id = await ensureFolder(detectSubject(plain(text)));
+      const folder_id = focusId() || await ensureFolder(detectSubject(plain(text)));
       made.push(await db.insert('documents', {
         title: f.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' '), file_path: path, file_type: f.type || f.name.split('.').pop(),
         size_bytes: f.size, page_count: pages, text_content: text, folder_id,
@@ -81,12 +81,28 @@ export async function importToLibrary(fileList) {
   return made;
 }
 
-async function aiGenerate(text, kind, count, types) {
+export const MAX_ITEMS = 200;
+
+async function aiCall(text, kind, count, types) {
   const token = await auth.accessToken();
   const r = await fetch('/api/generate', { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` }, body: JSON.stringify({ text, kind, count, types }) });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `AI request failed (${r.status})`);
   return j;
+}
+/** Big requests are split into batches of up to 40, each from its own slice of the text. */
+async function aiGenerate(text, kind, count, types, onProgress = () => {}) {
+  const batches = Math.ceil(count / 40);
+  const key = kind === 'cards' ? 'cards' : 'questions';
+  const out = [];
+  const slice = Math.ceil(text.length / batches);
+  for (let b = 0; b < batches; b++) {
+    onProgress(b, batches);
+    const part = batches === 1 ? text : text.slice(Math.max(0, b * slice - 500), (b + 1) * slice);
+    const j = await aiCall(part, kind, Math.min(40, count - out.length), types);
+    out.push(...(j[key] || []));
+  }
+  return { [key]: out.slice(0, count) };
 }
 
 /**
@@ -107,9 +123,12 @@ export function openGenerator(src) {
         <label><input type="radio" name="kind" value="quiz" ${kind0 === 'quiz' ? 'checked' : ''}>${icon('quiz')}Quiz<small>Instant feedback per question</small></label>
         <label><input type="radio" name="kind" value="exam" ${kind0 === 'exam' ? 'checked' : ''}>${icon('clock')}Exam<small>Timed, results at the end</small></label>
       </div>
-      <label class="field"><span>Title</span><input name="title" value="${esc(src.title)}" required></label>
       <div class="row gap wrap">
-        <label class="field grow"><span>How many?</span><input name="count" type="number" min="3" max="100" value="${kind0 === 'exam' ? 30 : 15}"></label>
+        <label class="field grow" style="min-width:200px"><span>Title</span><input name="title" value="${esc(src.title)}" required></label>
+        <label class="field" style="min-width:180px"><span>Subject</span>${subjectSelectHtml(src.folder_id || focusId(), { id: 'gsubject' })}</label>
+      </div>
+      <div class="row gap wrap">
+        <label class="field grow"><span>How many? (up to ${MAX_ITEMS})</span><input name="count" type="number" min="3" max="${MAX_ITEMS}" value="${kind0 === 'exam' ? 30 : 15}"></label>
         <label class="field grow q-only"><span>Time limit (minutes, exam)</span><input name="time" type="number" min="0" max="300" value="30"></label>
         ${pageCount > 1 ? `<label class="field grow"><span>Pages (of ${pageCount})</span><input name="pages" placeholder="e.g. 1-20 (blank = all)"></label>` : ''}
       </div>
@@ -126,6 +145,7 @@ export function openGenerator(src) {
     </form>`,
   });
   const form = m.el.querySelector('#gen');
+  bindSubjectSelect(form.querySelector('#gsubject'));
   const sync = () => {
     const k = form.kind.value;
     m.el.querySelectorAll('.q-only').forEach((el) => { el.style.display = k === 'cards' ? 'none' : ''; });
@@ -142,7 +162,8 @@ export function openGenerator(src) {
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Generating…';
     try {
       const kind = form.kind.value;
-      const count = Math.max(3, Math.min(100, Number(form.count.value) || 15));
+      const count = Math.max(3, Math.min(MAX_ITEMS, Number(form.count.value) || 15));
+      const folder_id = form.querySelector('#gsubject').value || null;
       const types = [...form.querySelectorAll('[name=types]:checked')].map((x) => x.value);
       if (kind !== 'cards' && !types.length) throw new Error('Pick at least one question type');
       let text = rawText;
@@ -156,19 +177,21 @@ export function openGenerator(src) {
       const useAI = form.engine?.value === 'ai';
       const title = form.title.value.trim() || src.title;
       if (kind === 'cards') {
-        let cards = useAI ? (await aiGenerate(text, 'cards', count)).cards : makeFlashcards(text, { max: count });
+        const prog = (b, n) => { if (n > 1) btn.innerHTML = `<span class="spinner"></span> Generating… ${b + 1}/${n}`; };
+        let cards = useAI ? (await aiGenerate(text, 'cards', count, null, prog)).cards : makeFlashcards(text, { max: count });
         cards = (cards || []).filter((c) => c.front && c.back);
         if (!cards.length) throw new Error('Couldn\'t find clear facts or definitions. Try a different section, or add cards by hand.');
-        const deck = await db.insert('decks', { title, folder_id: src.folder_id || null, source_label: src.source || src.title });
+        const deck = await db.insert('decks', { title, folder_id, source_label: src.source || src.title });
         await db.insert('cards', cards.map((c) => ({ deck_id: deck.id, front: String(c.front).slice(0, 2000), back: String(c.back).slice(0, 4000) })));
-        m.close(); toast(`Made ${cards.length} flashcards`, 'ok'); updateDueCount();
+        m.close(); toast(cards.length < count ? `Made ${cards.length} flashcards — that's everything clear enough in this material` : `Made ${cards.length} flashcards`, 'ok'); updateDueCount();
         go(`#/decks/${deck.id}`);
       } else {
-        let qs = useAI ? (await aiGenerate(text, kind, count, types)).questions : makeQuestions(text, { count, types });
+        const prog = (b, n) => { if (n > 1) btn.innerHTML = `<span class="spinner"></span> Generating… ${b + 1}/${n}`; };
+        let qs = useAI ? (await aiGenerate(text, kind, count, types, prog)).questions : makeQuestions(text, { count, types });
         qs = (qs || []).filter((q) => q.prompt && q.answer != null).map((q, i) => ({ id: q.id || `q${Date.now().toString(36)}${i}`, ...q, answer: String(q.answer) }));
         if (qs.length < 3) throw new Error('Not enough material for questions here. Try more text or other question types.');
-        const quiz = await db.insert('quizzes', { title, kind, questions: qs, time_limit_min: kind === 'exam' ? Number(form.time.value) || null : null, folder_id: src.folder_id || null, source_label: src.source || src.title });
-        m.close(); toast(`${kind === 'exam' ? 'Exam' : 'Quiz'} ready — ${qs.length} questions`, 'ok');
+        const quiz = await db.insert('quizzes', { title, kind, questions: qs, time_limit_min: kind === 'exam' ? Number(form.time.value) || null : null, folder_id, source_label: src.source || src.title });
+        m.close(); toast(`${kind === 'exam' ? 'Exam' : 'Quiz'} ready — ${qs.length} questions${qs.length < count ? ' (all this material supports)' : ''}`, 'ok');
         go(`#/quiz/${quiz.id}`);
       }
     } catch (err) {

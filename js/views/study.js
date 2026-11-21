@@ -5,13 +5,15 @@ import { schedule, preview, isDue } from '../srs.js';
 
 export async function render(el, [arg = 'all']) {
   const [deckId, qs] = arg.split('?');
-  const cram = new URLSearchParams(qs || '').get('mode') === 'cram';
+  const params = new URLSearchParams(qs || '');
+  const cram = params.get('mode') === 'cram';
+  const size = Math.min(200, Number(params.get('n')) || Number(localStorage.getItem('studydeck.sessionSize')) || 50);
   const deck = deckId !== 'all' ? await db.get('decks', deckId) : null;
   setCrumb(deck ? deck.title : 'Review');
   const all = deck ? await db.list('cards', { eq: { deck_id: deckId } }) : await db.list('cards');
   let practice = cram;
-  let queue = cram ? shuffle(all) : shuffle(all.filter(isDue));
-  if (!queue.length && all.length) { practice = true; queue = shuffle(all).slice(0, 20); }
+  let queue = (cram ? shuffle(all) : shuffle(all.filter(isDue))).slice(0, size);
+  if (!queue.length && all.length) { practice = true; queue = shuffle(all).slice(0, size); }
   if (!queue.length) {
     el.innerHTML = `<div class="empty">${icon('check')}<h3>Nothing to review</h3><p class="small">Add or generate some flashcards first.</p><a class="btn" href="#/decks">Go to flashcards</a></div>`;
     return;

@@ -1,5 +1,5 @@
 import { db } from '../store.js';
-import { state, go, setCrumb } from '../app.js';
+import { state, go, setCrumb, subjectSelectHtml, bindSubjectSelect } from '../app.js';
 import { esc, icon, pct, shuffle, timeAgo, toast, modal, confirmBox } from '../util.js';
 import { grade } from '../generator.js';
 import { ring } from '../chart.js';
@@ -23,9 +23,14 @@ async function intro(el, quiz) {
       <h1 style="font-size:28px;margin-top:10px">${esc(quiz.title)}</h1>
       <div class="item-meta" style="font-size:13px"><span>${quiz.questions.length} questions</span>${exam && quiz.time_limit_min ? `<span>${icon('clock')} ${quiz.time_limit_min} minutes</span>` : ''}${quiz.source_label ? `<span>From ${esc(quiz.source_label)}</span>` : ''}</div>
       <p class="muted small" style="margin-top:12px">${exam ? 'Answer in any order. Your score appears when you submit or when time runs out.' : 'You\'ll see if you\'re right after each question.'}</p>
-      <div class="row gap wrap" style="margin-top:20px">
-        <button class="btn primary" id="start">${icon('play')} Start</button>
-        <label class="small muted row gap"><input type="checkbox" id="shuf" checked> Shuffle questions</label>
+      <div class="row gap wrap" style="margin-top:18px">
+        <label class="field" style="margin:0;min-width:150px"><span>Questions</span><select class="input" id="howmany">${(() => { const n = Math.min(200, quiz.questions.length); return [...new Set([10, 20, 30, 50, 100, 200].filter((x) => x < n).concat(n))].map((x) => `<option value="${x}" ${x === n ? 'selected' : ''}>${x === n ? `All ${x}` : x}</option>`).join(''); })()}</select></label>
+        <label class="field" style="margin:0;min-width:170px"><span>Subject</span>${subjectSelectHtml(quiz.folder_id, { id: 'qsub' })}</label>
+      </div>
+      <div class="row gap wrap" style="margin-top:16px">
+        <button class="btn primary" id="start">${icon('play')} Start ${exam ? 'exam' : 'quiz'}</button>
+        <a class="btn" href="#/learn/quiz/${quiz.id}" title="Missed questions repeat until you get them right">${icon('target')} Learn mode</a>
+        <label class="small muted row gap"><input type="checkbox" id="shuf" checked> Shuffle</label>
         <span class="grow"></span>
         <button class="btn ghost sm" id="edit">${icon('edit')} Review & edit questions</button>
       </div>
@@ -35,10 +40,12 @@ async function intro(el, quiz) {
     </div></div>` : ''}
   </div>`;
   el.querySelector('#start').addEventListener('click', () => {
-    const qs = el.querySelector('#shuf').checked ? shuffle(quiz.questions) : quiz.questions;
+    const n = Number(el.querySelector('#howmany').value) || quiz.questions.length;
+    const qs = (el.querySelector('#shuf').checked ? shuffle(quiz.questions) : quiz.questions).slice(0, n);
     run(el, quiz, qs.map((q) => ({ ...q, options: q.type === 'mcq' ? shuffle(q.options || []) : q.options })), true);
   });
   el.querySelector('#edit').addEventListener('click', () => editQuestions(el, quiz));
+  bindSubjectSelect(el.querySelector('#qsub'), async (v) => { await db.update('quizzes', quiz.id, { folder_id: v }); quiz.folder_id = v; toast('Subject updated', 'ok'); });
 }
 
 function run(el, quiz, questions, record) {

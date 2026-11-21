@@ -20,7 +20,7 @@ export default async function handler(req, res) {
   if (!who.ok) return res.status(401).json({ error: 'Session expired — sign in again' });
 
   const { text = '', kind = 'quiz', count = 15, types = ['mcq', 'tf', 'fill'] } = req.body || {};
-  const n = Math.max(1, Math.min(Number(count) || 15, 60));
+  const n = Math.max(1, Math.min(Number(count) || 15, 40)); // the app sends big sets (up to 200) in batches of 40
   const source = String(text).slice(0, MAX_CHARS);
   if (source.trim().length < 80) return res.status(400).json({ error: 'Not enough text to work from' });
 

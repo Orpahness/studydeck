@@ -1,5 +1,5 @@
 import { db } from '../store.js';
-import { state, go, setCrumb, folderById, refreshFolders } from '../app.js';
+import { state, go, setCrumb, folderById, refreshFolders, focusId } from '../app.js';
 import { esc, icon, timeAgo, debounce, toast, confirmBox, promptBox, modal, SWATCHES, $$ } from '../util.js';
 import { renderMd } from '../md.js';
 import { importAsNotes, bindDropzone, openGenerator } from '../create.js';
@@ -52,7 +52,7 @@ export async function render(el, [noteId]) {
     if (f) { folderFilter = f.dataset.f; $$('#folders .chip').forEach((c) => c.classList.toggle('active', c === f)); drawList(); }
   });
   el.querySelector('#manage').addEventListener('click', () => manageFolders(() => render(el, [noteId])));
-  const newNote = async () => { const n = await db.insert('notes', { title: 'Untitled note', content: '', folder_id: folderFilter || null }); go(`#/notes/${n.id}`); };
+  const newNote = async () => { const n = await db.insert('notes', { title: 'Untitled note', content: '', folder_id: folderFilter || focusId() }); go(`#/notes/${n.id}`); };
   el.querySelector('#new').addEventListener('click', newNote);
   el.querySelector('#new2')?.addEventListener('click', newNote);
   bindDropzone(el.querySelector('#drop'), async (fl) => { const made = await importAsNotes(fl); if (made.length) go(`#/notes/${made[0].id}`); });
@@ -153,6 +153,8 @@ function bindEditor(el, note, notes, drawList) {
     m.className = 'menu';
     m.style.top = `${r.bottom + 6 + scrollY}px`; m.style.right = `${Math.max(10, innerWidth - r.right)}px`;
     m.innerHTML = `<button data-a="pin">${icon('pin')} ${note.pinned ? 'Unpin' : 'Pin to top'}</button>
+      <button data-a="pdf">${icon('download')} Export as PDF</button>
+      <button data-a="docx">${icon('download')} Export as Word</button>
       <button data-a="dl">${icon('download')} Download (.md)</button>
       <button data-a="del" class="danger">${icon('trash')} Delete permanently</button>`;
     document.body.append(m);
@@ -162,6 +164,10 @@ function bindEditor(el, note, notes, drawList) {
       const a = ev.target.closest('[data-a]')?.dataset.a; if (!a) return;
       m.remove();
       if (a === 'pin') { await db.update('notes', note.id, { pinned: !note.pinned }); render(el, [note.id]); }
+      if (a === 'pdf' || a === 'docx') {
+        const ex = await import('../export.js');
+        try { await (a === 'pdf' ? ex.exportPdf : ex.exportDocx)(title.value, body.value); toast('Downloaded', 'ok'); } catch (err) { toast('Export failed: ' + err.message, 'err'); }
+      }
       if (a === 'dl') {
         const blob = new Blob([`# ${title.value}\n\n${body.value}`], { type: 'text/markdown' });
         const link = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: `${title.value.replace(/[^\w\- ]+/g, '').trim() || 'note'}.md` });

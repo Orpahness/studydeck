@@ -1,14 +1,16 @@
 import { db } from '../store.js';
-import { state, go, folderById } from '../app.js';
-import { esc, icon, timeAgo, debounce, pct, $$ } from '../util.js';
+import { state, go, folderById, focusId, setFocus, ensureFolder } from '../app.js';
+import { esc, icon, timeAgo, debounce, pct, $$, promptBox, toast } from '../util.js';
 import { loadStats, dailyActivity } from '../stats.js';
 import { areaChart } from '../chart.js';
 import { isDue, isMastered } from '../srs.js';
 import { openSourcePicker, importAsNotes, importToLibrary, pickFiles } from '../create.js';
 
-let filter = null; // folder id
+let filter = null; // folder id of the subject being studied (null = all)
+const DRAFT_KEY = 'studydeck.writerDraft';
 
 export async function render(el) {
+  filter = focusId();
   const [stats, notes, decks, quizzes, docs] = await Promise.all([
     loadStats(),
     db.list('notes', { select: 'id,title,content,tags,folder_id,updated_at,pinned', order: 'updated_at', desc: true, limit: 50 }),
@@ -35,10 +37,12 @@ export async function render(el) {
         <h1><span class="grad">${name ? `Hi ${esc(name)},` : 'Make studying'}</span> ${name ? 'ready to study?' : 'simple!'}</h1>
         <p>Your notes, flashcards and practice tests in one place. A little every day keeps it all fresh.</p>
       </div>
-      <div class="row gap" style="flex-wrap:nowrap;min-width:0">
-        <div class="chips grow">
-          <button class="chip ${!filter ? 'active' : ''}" data-f="">${filter ? '' : '<span class="swatch" style="background:var(--good)"></span>'}All subjects</button>
-          ${state.folders.map((f) => `<button class="chip ${filter === f.id ? 'active' : ''}" data-f="${f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}
+      <div class="row gap subject-row" style="flex-wrap:nowrap;min-width:0">
+        <div class="chips grow" role="radiogroup" aria-label="Subject you're studying">
+          <span class="small muted" style="align-self:center;white-space:nowrap;padding-right:2px">Studying:</span>
+          <button class="chip ${!filter ? 'active' : ''}" data-f="" role="radio" aria-checked="${!filter}">${filter ? '' : '<span class="swatch" style="background:var(--good)"></span>'}All subjects</button>
+          ${state.folders.map((f) => `<button class="chip ${filter === f.id ? 'active' : ''}" data-f="${f.id}" role="radio" aria-checked="${filter === f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}
+          <button class="chip" data-act="add-subject" title="Add a subject">${icon('plus')} Subject</button>
         </div>
         <button class="btn dark" id="new-btn">${icon('plus')}<span>New</span></button>
       </div>
@@ -73,6 +77,19 @@ export async function render(el) {
         <div class="card stat"><span class="lbl">${icon('target')} Mastered</span><span class="num">${stats.mastered}<span class="muted small"> / ${stats.cards.length}</span></span></div>
         <div class="card stat"><span class="lbl">${icon('quiz')} Avg quiz score</span><span class="num">${stats.avgScore == null ? '—' : stats.avgScore + '%'}</span></div>
       </div>
+
+      <div class="card writer" id="writer">
+        <div class="card-head"><span class="item-ico" style="width:38px;height:38px;border-radius:11px">${icon('edit')}</span><div><h3>Write notes</h3><div class="tiny muted">Type here, then save to Notes or download as PDF / Word</div></div><span class="grow"></span><span class="tiny dim" id="w-state"></span></div>
+        <input class="title-in" id="w-title" placeholder="Title (e.g. Chapter 3 summary)" aria-label="Title">
+        <textarea class="textarea" id="w-body" placeholder="Start typing…&#10;# Heading   - bullet   1. numbered   **bold**   *italic*"></textarea>
+        <div class="row gap wrap" style="margin-top:12px">
+          <button class="btn primary sm" data-w="save">${icon('note')} Save to notes</button>
+          <button class="btn sm" data-w="pdf">${icon('download')} PDF</button>
+          <button class="btn sm" data-w="docx">${icon('download')} Word</button>
+          <span class="grow"></span>
+          <button class="btn ghost sm" data-w="clear">Clear</button>
+        </div>
+      </div>
     </div>
 
     <aside class="dash-side">
@@ -100,13 +117,21 @@ export async function render(el) {
     </aside>
   </div>`;
 
+  el.querySelector('.subject-row .chip.active')?.scrollIntoView({ block: 'nearest', inline: 'center' });
   const act = dailyActivity(stats, 7);
   areaChart(el.querySelector('#act-chart'), { values: act.map((d) => d.value), labels: act.map((d) => d.label), highlight: act.length - 1 });
 
   // ------- events (bound to the fresh root so re-renders don't stack listeners)
   el.firstElementChild.addEventListener('click', async (e) => {
     const f = e.target.closest('[data-f]');
-    if (f) { filter = f.dataset.f || null; return render(el); }
+    if (f) {
+      await setFocus(f.dataset.f || null);
+      const name = folderById(f.dataset.f)?.name;
+      toast(name ? `Studying ${name} — new uploads and quizzes go here` : 'Showing all subjects — uploads are sorted automatically');
+      return render(el);
+    }
+    const w = e.target.closest('[data-w]');
+    if (w) return writerAction(w.dataset.w);
     const gn = e.target.closest('[data-gen-note]');
     if (gn) {
       e.stopPropagation();
@@ -120,6 +145,10 @@ export async function render(el) {
       if (a.dataset.act === 'up-notes') { const fl = await pickFiles(); if (fl.length && (await importAsNotes(fl)).length) render(el); }
       if (a.dataset.act === 'add-file') { const fl = await pickFiles(); if (fl.length && (await importToLibrary(fl)).length) render(el); }
       if (a.dataset.act === 'gen') openSourcePicker('quiz');
+      if (a.dataset.act === 'add-subject') {
+        const name = await promptBox({ title: 'Add a subject', label: 'What are you studying? (e.g. Anatomy, Accounting 2)', confirmText: 'Add & study' });
+        if (name) { await setFocus(await ensureFolder(name)); render(el); }
+      }
       if (a.dataset.act === 'study') go(`#/study/${a.dataset.id}`);
       return;
     }
@@ -127,6 +156,29 @@ export async function render(el) {
     if (g) go(g.dataset.go);
   });
   el.querySelector('#new-btn').addEventListener('click', (e) => { e.stopPropagation(); newMenu(e.currentTarget, el); });
+
+  // ---- writer: draft kept on this device until saved or cleared
+  const wt = el.querySelector('#w-title'), wb = el.querySelector('#w-body'), ws = el.querySelector('#w-state');
+  try { const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || '{}'); wt.value = d.title || ''; wb.value = d.body || ''; } catch { /* ignore */ }
+  const saveDraft = debounce(() => { try { localStorage.setItem(DRAFT_KEY, JSON.stringify({ title: wt.value, body: wb.value })); ws.textContent = 'Draft saved'; } catch { /* ignore */ } }, 400);
+  wt.addEventListener('input', saveDraft); wb.addEventListener('input', saveDraft);
+  async function writerAction(k) {
+    const title = wt.value.trim() || 'My notes';
+    if (k === 'clear') { if (!wb.value || confirm('Clear this draft?')) { wt.value = ''; wb.value = ''; localStorage.removeItem(DRAFT_KEY); ws.textContent = ''; } return; }
+    if (!wb.value.trim()) return toast('Write something first', 'err');
+    if (k === 'save') {
+      const { autoTags, detectSubject } = await import('../generator.js');
+      const n = await db.insert('notes', { title, content: wb.value, tags: autoTags(wb.value), folder_id: filter || await ensureFolder(detectSubject(wb.value)) });
+      wt.value = ''; wb.value = ''; localStorage.removeItem(DRAFT_KEY); ws.textContent = '';
+      toast('Saved to your notes', 'ok');
+      return go(`#/notes/${n.id}`);
+    }
+    try {
+      const ex = await import('../export.js');
+      if (k === 'pdf') await ex.exportPdf(title, wb.value); else await ex.exportDocx(title, wb.value);
+      toast(`Downloaded ${k === 'pdf' ? 'PDF' : 'Word file'}`, 'ok');
+    } catch (err) { toast('Export failed: ' + err.message, 'err'); }
+  }
 
   const qn = el.querySelector('#qn'), qs = el.querySelector('#qn-state');
   const save = debounce(async () => { state.profile = await db.saveProfile({ quick_note: qn.value }); qs.textContent = 'Saved'; }, 700);
