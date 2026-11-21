@@ -16,7 +16,7 @@ export async function render(el) {
     <div class="page-head"><div><h1>Quizzes & exams</h1><p class="sub">Quizzes give feedback after every question. Exams are timed and graded at the end.</p></div>
       <span class="grow"></span><div class="row gap"><button class="btn" data-new="exam">${icon('clock')} New exam</button><button class="btn primary" data-new="quiz">${icon('sparkle')} New quiz</button></div></div>
     <div class="seg" style="margin-bottom:16px"><button data-t="all" class="${tab === 'all' ? 'on' : ''}">All</button><button data-t="quiz" class="${tab === 'quiz' ? 'on' : ''}">Quizzes</button><button data-t="exam" class="${tab === 'exam' ? 'on' : ''}">Exams</button></div>
-    ${state.folders.length ? `<div class="chips" style="margin-bottom:16px"><span class="small muted" style="align-self:center">Studying:</span><button class="chip ${!fid ? 'active' : ''}" data-f="">All</button>${state.folders.map((f) => `<button class="chip ${fid === f.id ? 'active' : ''}" data-f="${f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}</div>` : ''}
+    ${state.folders.length ? `<div class="chips" style="margin-bottom:16px"><span class="small muted" style="align-self:center">Studying:</span><button class="chip ${!fid ? 'active' : ''}" data-f="">All</button>${state.folders.map((f) => `<button class="chip ${fid === f.id ? 'active' : ''}" data-f="${f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}<button class="chip" data-edit-subjects>${icon('edit')} Edit</button></div>` : ''}
     ${rows.length ? `<div class="list">${rows.map((q) => {
       const at = attempts.filter((a) => a.quiz_id === q.id);
       const best = at.length ? Math.max(...at.map((a) => pct(a.score, a.total))) : null;
@@ -34,6 +34,7 @@ export async function render(el) {
   const root = el.firstElementChild;
   root.addEventListener('click', async (e) => {
     const t = e.target.closest('[data-t]'); if (t) { tab = t.dataset.t; return render(el); }
+    if (e.target.closest('[data-edit-subjects]')) { const { manageSubjects } = await import('../app.js'); return manageSubjects(() => render(el)); }
     const f = e.target.closest('[data-f]'); if (f) { await setFocus(f.dataset.f || null); return render(el); }
     const n = e.target.closest('[data-new]'); if (n) return openSourcePicker(n.dataset.new);
     const row = e.target.closest('[data-id]'); if (!row) return;

@@ -16,15 +16,18 @@ export async function render(el, [id]) {
 async function intro(el, quiz) {
   const attempts = await db.list('quiz_attempts', { eq: { quiz_id: quiz.id }, order: 'created_at', desc: true });
   const exam = quiz.kind === 'exam';
+  const answerable = quiz.questions.filter((q) => q.answer != null && q.answer !== '');
+  const noAnswer = quiz.questions.length - answerable.length;
   el.innerHTML = `<div class="quiz-wrap">
     <div class="row gap"><a class="icon-btn sm" href="#/quizzes" aria-label="Back">${icon('back')}</a><span class="muted small">Quizzes & exams</span></div>
     <div class="card hl" style="padding:28px">
       <span class="tag">${exam ? 'Exam' : 'Quiz'}</span>
       <h1 style="font-size:28px;margin-top:10px">${esc(quiz.title)}</h1>
       <div class="item-meta" style="font-size:13px"><span>${quiz.questions.length} questions</span>${exam && quiz.time_limit_min ? `<span>${icon('clock')} ${quiz.time_limit_min} minutes</span>` : ''}${quiz.source_label ? `<span>From ${esc(quiz.source_label)}</span>` : ''}</div>
+      ${noAnswer ? `<div class="feedback" style="margin-top:12px;border-color:rgba(251,191,36,.45)"><b>${noAnswer} question${noAnswer > 1 ? 's have' : ' has'} no answer yet</b> (the file didn't include one). They're skipped until you set the answer in <a href="#" id="fix">Review & edit questions</a>.</div>` : ''}
       <p class="muted small" style="margin-top:12px">${exam ? 'Answer in any order. Your score appears when you submit or when time runs out.' : 'You\'ll see if you\'re right after each question.'}</p>
       <div class="row gap wrap" style="margin-top:18px">
-        <label class="field" style="margin:0;min-width:150px"><span>Questions</span><select class="input" id="howmany">${(() => { const n = Math.min(200, quiz.questions.length); return [...new Set([10, 20, 30, 50, 100, 200].filter((x) => x < n).concat(n))].map((x) => `<option value="${x}" ${x === n ? 'selected' : ''}>${x === n ? `All ${x}` : x}</option>`).join(''); })()}</select></label>
+        <label class="field" style="margin:0;min-width:150px"><span>Questions</span><select class="input" id="howmany">${(() => { const n = answerable.length; return [...new Set([10, 20, 30, 50, 100, 200].filter((x) => x < n).concat(n))].map((x) => `<option value="${x}" ${x === n ? 'selected' : ''}>${x === n ? `All ${x}` : x}</option>`).join(''); })()}</select></label>
         <label class="field" style="margin:0;min-width:170px"><span>Subject</span>${subjectSelectHtml(quiz.folder_id, { id: 'qsub' })}</label>
       </div>
       <div class="row gap wrap" style="margin-top:16px">
@@ -41,10 +44,12 @@ async function intro(el, quiz) {
   </div>`;
   el.querySelector('#start').addEventListener('click', () => {
     const n = Number(el.querySelector('#howmany').value) || quiz.questions.length;
-    const qs = (el.querySelector('#shuf').checked ? shuffle(quiz.questions) : quiz.questions).slice(0, n);
+    if (!answerable.length) return toast('Set the answers first in “Review & edit questions”', 'err');
+    const qs = (el.querySelector('#shuf').checked ? shuffle(answerable) : answerable).slice(0, n);
     run(el, quiz, qs.map((q) => ({ ...q, options: q.type === 'mcq' ? shuffle(q.options || []) : q.options })), true);
   });
   el.querySelector('#edit').addEventListener('click', () => editQuestions(el, quiz));
+  el.querySelector('#fix')?.addEventListener('click', (e) => { e.preventDefault(); editQuestions(el, quiz); });
   bindSubjectSelect(el.querySelector('#qsub'), async (v) => { await db.update('quizzes', quiz.id, { folder_id: v }); quiz.folder_id = v; toast('Subject updated', 'ok'); });
 }
 
@@ -204,7 +209,7 @@ function showResults(el, quiz, questions, answers, results, duration, attempt) {
 function editQuestions(el, quiz) {
   const draw = () => `<div class="stack">${quiz.questions.map((q, k) => `<div class="card" style="padding:14px">
       <div class="row gap" style="align-items:flex-start"><div class="grow"><div class="tiny muted">${k + 1} · ${TYPE_LABEL[q.type]}</div><div class="small" style="white-space:pre-line;margin-top:4px">${esc(q.prompt)}</div>
-      <div class="tiny" style="margin-top:6px;color:var(--good)">✓ ${esc(q.answer)}</div></div>
+      ${q.answer != null && q.answer !== '' ? `<div class="tiny" style="margin-top:6px;color:var(--good)">✓ ${esc(q.answer)}</div>` : '<div class="tiny" style="margin-top:6px;color:#ffd38a">No answer yet — tap edit to set it</div>'}</div>
       <button class="icon-btn sm" data-e="${k}" aria-label="Edit">${icon('edit')}</button><button class="icon-btn sm" data-d="${k}" aria-label="Delete">${icon('trash')}</button></div></div>`).join('')}</div>`;
   const m = modal({ title: `Questions (${quiz.questions.length})`, wide: true, body: draw(), onClose: () => intro(el, quiz) });
   const body = m.el.querySelector('.modal-body');
@@ -223,16 +228,24 @@ function editQuestions(el, quiz) {
       body.innerHTML = `<form id="qe">
         <label class="field"><span>Question</span><textarea name="prompt" rows="3" required>${esc(q.prompt)}</textarea></label>
         ${q.type === 'mcq' ? `<label class="field"><span>Options (one per line)</span><textarea name="options" rows="4">${esc((q.options || []).join('\n'))}</textarea></label>` : ''}
-        <label class="field"><span>Correct answer${q.type === 'mcq' ? ' (must match an option exactly)' : q.type === 'tf' ? ' (True or False)' : ''}</span><input name="answer" value="${esc(q.answer)}" required></label>
+        ${q.type === 'tf' ? `<label class="field"><span>Correct answer</span><select name="answer"><option ${q.answer === 'True' ? 'selected' : ''}>True</option><option ${q.answer === 'False' ? 'selected' : ''}>False</option></select></label>`
+          : q.type === 'mcq' ? `<div class="field"><span>Correct answer (tap the right choice)</span><div class="opts" id="pick">${(q.options || []).map((o, i) => `<label class="opt ${o === q.answer ? 'sel' : ''}" style="cursor:pointer"><input type="radio" name="answer" value="${esc(o)}" ${o === q.answer ? 'checked' : ''} style="display:none"><span class="key">${'ABCDEFGH'[i]}</span><span>${esc(o)}</span></label>`).join('')}</div></div>`
+          : `<label class="field"><span>Correct answer</span><input name="answer" value="${esc(q.answer ?? '')}" required></label>`}
         <div class="row end gap"><button type="button" class="btn ghost" id="qe-cancel">Cancel</button><button class="btn primary">Save</button></div></form>`;
       body.querySelector('#qe-cancel').addEventListener('click', () => { body.innerHTML = draw(); });
+      body.querySelector('#pick')?.addEventListener('change', () => body.querySelectorAll('#pick .opt').forEach((l) => l.classList.toggle('sel', l.querySelector('input').checked)));
       body.querySelector('#qe').addEventListener('submit', async (ev) => {
         ev.preventDefault();
         const f = ev.target;
-        const upd = { ...q, prompt: f.prompt.value.trim(), answer: f.answer.value.trim() };
+        const ansVal = (f.querySelector('[name=answer]:checked') || f.querySelector('select[name=answer], input[name=answer]:not([type=radio])'))?.value?.trim() || '';
+        const upd = { ...q, prompt: f.prompt.value.trim(), answer: ansVal || null };
         if (q.type === 'mcq') {
+          const oldOpts = q.options || [];
           upd.options = f.options.value.split('\n').map((s) => s.trim()).filter(Boolean);
-          if (!upd.options.includes(upd.answer)) return toast('The answer must be one of the options', 'err');
+          // keep the chosen answer if its option text was edited in the same position
+          const idx = oldOpts.indexOf(upd.answer);
+          if (idx > -1 && !upd.options.includes(upd.answer)) upd.answer = upd.options[idx] || null;
+          if (!upd.answer) return toast('Tap the correct choice', 'err');
         }
         if (q.type === 'tf' && !['True', 'False'].includes(upd.answer)) return toast('Answer must be True or False', 'err');
         quiz.questions[k] = upd;

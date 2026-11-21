@@ -3,6 +3,7 @@
 import { db, files, auth } from './store.js';
 import { extractText, ACCEPT } from './extract.js';
 import { makeFlashcards, makeQuestions, autoTitle, autoTags, detectSubject } from './generator.js';
+import { extractExistingQuestions } from './importq.js';
 import { state, ensureFolder, go, updateDueCount, focusId, subjectSelectHtml, bindSubjectSelect } from './app.js';
 import { esc, icon, modal, toast, fmtBytes } from './util.js';
 
@@ -112,12 +113,21 @@ async function aiGenerate(text, kind, count, types, onProgress = () => {}) {
 export function openGenerator(src) {
   const rawText = src.text || '';
   if (plain(rawText).trim().length < 60) { toast('Add more text first — there isn\'t enough to build questions from.', 'err'); return; }
-  const kind0 = src.defaultKind || 'cards';
+  const found = extractExistingQuestions(rawText);
+  const kind0 = src.defaultKind || (found ? 'quiz' : 'cards');
   const pageCount = (rawText.match(/\f/g) || []).length + 1;
   const m = modal({
     title: 'Create study material', wide: true,
     body: `<form id="gen">
       <p class="small muted" style="margin-bottom:14px">From: <b style="color:var(--text)">${esc(src.title)}</b></p>
+      ${found ? `<div class="found-box">
+        <div class="row gap">${icon('check')}<b>This file already has ${found.total} questions${found.missing ? ` (${found.total - found.missing} with answers)` : ' with answers'}</b></div>
+        <div class="check-row" style="margin-top:10px">
+          <label><input type="radio" name="source" value="file" checked> Use the file's questions exactly as written</label>
+          <label><input type="radio" name="source" value="gen"> Make new questions from the text</label>
+        </div>
+        ${found.missing ? `<p class="tiny muted" style="margin-top:8px">${found.missing} question${found.missing > 1 ? 's have' : ' has'} no answer in the file. You can add them later in “Review & edit questions” — until then they're skipped in Learn and graded quizzes.</p>` : ''}
+      </div>` : ''}
       <div class="radio-cards">
         <label><input type="radio" name="kind" value="cards" ${kind0 === 'cards' ? 'checked' : ''}>${icon('cards')}Flashcards<small>Flip cards with spaced review</small></label>
         <label><input type="radio" name="kind" value="quiz" ${kind0 === 'quiz' ? 'checked' : ''}>${icon('quiz')}Quiz<small>Instant feedback per question</small></label>
@@ -148,8 +158,12 @@ export function openGenerator(src) {
   bindSubjectSelect(form.querySelector('#gsubject'));
   const sync = () => {
     const k = form.kind.value;
-    m.el.querySelectorAll('.q-only').forEach((el) => { el.style.display = k === 'cards' ? 'none' : ''; });
+    const fromFile = found && form.source?.value === 'file';
+    m.el.querySelectorAll('.q-only').forEach((el) => { el.style.display = k === 'cards' || fromFile ? 'none' : ''; });
     form.time.closest('.field').style.display = k === 'exam' ? '' : 'none';
+    form.count.closest('.field').style.display = fromFile ? 'none' : '';
+    if (form.pages) form.pages.closest('.field').style.display = fromFile ? 'none' : '';
+    const eng = form.querySelector('[name=engine]')?.closest('.field'); if (eng) eng.style.display = fromFile ? 'none' : '';
   };
   form.addEventListener('change', (e) => {
     if (e.target.name === 'kind') form.count.value = e.target.value === 'exam' ? 30 : 15;
@@ -175,10 +189,13 @@ export function openGenerator(src) {
       }
       text = plain(text);
       const useAI = form.engine?.value === 'ai';
+      const fromFile = found && form.source?.value === 'file';
       const title = form.title.value.trim() || src.title;
       if (kind === 'cards') {
         const prog = (b, n) => { if (n > 1) btn.innerHTML = `<span class="spinner"></span> Generating… ${b + 1}/${n}`; };
-        let cards = useAI ? (await aiGenerate(text, 'cards', count, null, prog)).cards : makeFlashcards(text, { max: count });
+        let cards = fromFile
+          ? found.questions.filter((q) => q.answer != null).map((q) => ({ front: q.type === 'mcq' ? `${q.prompt}\n\n${q.options.map((o, i) => `${'abcdefgh'[i]}. ${o}`).join('\n')}` : q.prompt, back: q.answer }))
+          : useAI ? (await aiGenerate(text, 'cards', count, null, prog)).cards : makeFlashcards(text, { max: count });
         cards = (cards || []).filter((c) => c.front && c.back);
         if (!cards.length) throw new Error('Couldn\'t find clear facts or definitions. Try a different section, or add cards by hand.');
         const deck = await db.insert('decks', { title, folder_id, source_label: src.source || src.title });
@@ -187,11 +204,11 @@ export function openGenerator(src) {
         go(`#/decks/${deck.id}`);
       } else {
         const prog = (b, n) => { if (n > 1) btn.innerHTML = `<span class="spinner"></span> Generating… ${b + 1}/${n}`; };
-        let qs = useAI ? (await aiGenerate(text, kind, count, types, prog)).questions : makeQuestions(text, { count, types });
-        qs = (qs || []).filter((q) => q.prompt && q.answer != null).map((q, i) => ({ id: q.id || `q${Date.now().toString(36)}${i}`, ...q, answer: String(q.answer) }));
+        let qs = fromFile ? found.questions : useAI ? (await aiGenerate(text, kind, count, types, prog)).questions : makeQuestions(text, { count, types });
+        qs = (qs || []).filter((q) => q.prompt && (fromFile || q.answer != null)).map((q, i) => ({ id: q.id || `q${Date.now().toString(36)}${i}`, ...q, answer: q.answer == null ? null : String(q.answer) }));
         if (qs.length < 3) throw new Error('Not enough material for questions here. Try more text or other question types.');
         const quiz = await db.insert('quizzes', { title, kind, questions: qs, time_limit_min: kind === 'exam' ? Number(form.time.value) || null : null, folder_id, source_label: src.source || src.title });
-        m.close(); toast(`${kind === 'exam' ? 'Exam' : 'Quiz'} ready — ${qs.length} questions${qs.length < count ? ' (all this material supports)' : ''}`, 'ok');
+        m.close(); toast(fromFile ? `Imported all ${qs.length} questions from the file` : `${kind === 'exam' ? 'Exam' : 'Quiz'} ready — ${qs.length} questions${qs.length < count ? ' (all this material supports)' : ''}`, 'ok');
         go(`#/quiz/${quiz.id}`);
       }
     } catch (err) {

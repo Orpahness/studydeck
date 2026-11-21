@@ -1,5 +1,5 @@
 import { auth, db } from './store.js';
-import { $, $$, esc, icon, toast, fmtDate, modal, promptBox } from './util.js';
+import { $, $$, esc, icon, toast, fmtDate, modal, promptBox, confirmBox, SWATCHES } from './util.js';
 import { APP_NAME } from './config.js';
 
 export const state = { profile: null, folders: [], cleanup: [], aiEnabled: false };
@@ -55,6 +55,65 @@ export function bindSubjectSelect(sel, onChange) {
     }
     prev = sel.value;
     onChange?.(sel.value || null);
+  });
+}
+
+/** Add / rename / recolour / delete subjects. `after` runs when the dialog closes. */
+export function manageSubjects(after) {
+  const draw = () => `<div class="stack">
+    ${state.folders.length ? state.folders.map((f) => `<div class="row gap subj-row" data-id="${f.id}">
+        <button class="swatch-btn" data-a="color" aria-label="Change colour" style="background:${esc(f.color)}"></button>
+        <span class="grow" style="font-weight:500">${esc(f.name)}</span>
+        <button class="btn sm ghost" data-a="ren">${icon('edit')} Rename</button>
+        <button class="btn sm ghost" data-a="del" style="color:#ffb3bf">${icon('trash')} Delete</button></div>`).join('')
+      : '<p class="muted small">No subjects yet.</p>'}
+    <button class="btn" data-a="add">${icon('plus')} Add subject</button></div>`;
+  const m = modal({ title: 'Subjects', body: draw(), onClose: after });
+  const body = m.el.querySelector('.modal-body');
+  body.addEventListener('click', async (e) => {
+    const a = e.target.closest('[data-a]')?.dataset.a;
+    if (!a) return;
+    if (a === 'add') {
+      const name = await promptBox({ title: 'New subject', label: 'Subject name', confirmText: 'Add' });
+      if (name) await ensureFolder(name);
+      body.innerHTML = draw(); return;
+    }
+    const f = folderById(e.target.closest('[data-id]').dataset.id);
+    if (a === 'color') {
+      const next = SWATCHES[(SWATCHES.indexOf(f.color) + 1) % SWATCHES.length];
+      await db.update('folders', f.id, { color: next });
+    }
+    if (a === 'ren') {
+      const name = await promptBox({ title: 'Rename subject', label: 'New name', value: f.name, confirmText: 'Rename' });
+      if (name && name !== f.name) { await db.update('folders', f.id, { name }); toast('Renamed', 'ok'); }
+    }
+    if (a === 'del') {
+      const choice = await new Promise((resolve) => {
+        let done = false;
+        const d = modal({
+          title: `Delete “${f.name}”?`,
+          body: `<p class="muted small" style="margin-bottom:16px">What should happen to the notes, files, flashcards and quizzes in this subject?</p>
+            <div class="stack"><button class="btn" data-c="keep">Keep them (move to “No subject”)</button>
+            <button class="btn danger" data-c="all">${icon('trash')} Delete them too — permanently</button>
+            <button class="btn ghost" data-close>Cancel</button></div>`,
+          onClose: () => { if (!done) resolve(null); },
+        });
+        d.el.querySelectorAll('[data-c]').forEach((b) => b.addEventListener('click', () => { done = true; resolve(b.dataset.c); d.close(); }));
+      });
+      if (!choice) return;
+      if (choice === 'all') {
+        if (!await confirmBox({ title: 'Delete everything in it?', message: `All notes, files, decks and quizzes in “${f.name}” will be erased permanently.`, confirmText: 'Delete all', requireText: 'DELETE' })) return;
+        const { files } = await import('./store.js');
+        const docs = await db.list('documents', { eq: { folder_id: f.id }, select: 'id,file_path' });
+        await files.remove(docs.map((d) => d.file_path)).catch(() => {});
+        for (const t of ['notes', 'documents', 'decks', 'quizzes']) await db.removeWhere(t, { folder_id: f.id });
+      }
+      if (state.profile?.focus_folder_id === f.id) await setFocus(null);
+      await db.remove('folders', f.id);
+      toast('Subject deleted');
+    }
+    await refreshFolders();
+    body.innerHTML = draw();
   });
 }
 
@@ -197,7 +256,8 @@ async function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const key = parts[0] || '';
   const r = ROUTES[key] || ROUTES[''];
-  $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === r.nav));
+  const nav = key === 'learn' && parts[1] === 'quiz' ? 'quizzes' : r.nav;
+  $$('[data-nav]').forEach((a) => a.classList.toggle('active', a.dataset.nav === nav));
   setCrumb(r.title);
   document.title = `${r.title} · ${APP_NAME}`;
   const el = $('#view');

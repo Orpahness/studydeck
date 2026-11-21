@@ -466,3 +466,8 @@ p { margin: 0; }
 .subject-pick { display: inline-flex; align-items: center; gap: 8px; height: 38px; padding: 0 6px 0 14px; border-radius: 999px; border: 1px solid rgba(79,124,255,.5); background: rgba(79,124,255,.12); font-size: 13px; }
 .subject-pick select { background: transparent; border: 0; color: var(--text); font-weight: 600; outline: none; padding: 4px 4px; max-width: 160px; }
 .subject-pick select option { background: #141d45; }
+
+.swatch-btn { width: 22px; height: 22px; border-radius: 50%; border: 2px solid rgba(255,255,255,.25); cursor: pointer; flex: none; }
+.subj-row { padding: 8px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+.found-box { border: 1px solid rgba(52,211,153,.45); background: rgba(52,211,153,.08); border-radius: 16px; padding: 14px; margin-bottom: 16px; font-size: 14px; }
+.found-box .ico { color: var(--good); }

@@ -1,5 +1,5 @@
 import { db, auth } from '../store.js';
-import { state } from '../app.js';
+import { state, manageSubjects } from '../app.js';
 import { esc, icon, toast, confirmBox } from '../util.js';
 
 export async function render(el) {
@@ -22,6 +22,11 @@ export async function render(el) {
       <label class="field"><span>New password (8+ characters)</span><input name="pw" type="password" minlength="8" autocomplete="new-password" required></label>
       <div class="row end"><button class="btn sm">Update password</button></div>
     </form>` : ''}
+
+    <div class="card">
+      <div class="card-head"><h3>Subjects</h3><span class="grow"></span><button class="btn sm" id="subjects">${icon('edit')} Rename / delete</button></div>
+      <p class="small muted">${state.folders.length ? state.folders.map((f) => esc(f.name)).join(' · ') : 'No subjects yet.'}</p>
+    </div>
 
     <div class="card">
       <div class="card-head">${icon('shield')}<h3>Privacy</h3></div>
@@ -55,6 +60,7 @@ export async function render(el) {
   </div>`;
   const root = el.firstElementChild;
 
+  root.querySelector('#subjects').addEventListener('click', () => manageSubjects(() => render(el)));
   root.querySelector('#prof').addEventListener('submit', async (e) => {
     e.preventDefault();
     const f = e.target;

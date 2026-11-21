@@ -1,5 +1,5 @@
 import { db } from '../store.js';
-import { state, go, folderById, focusId, setFocus, ensureFolder } from '../app.js';
+import { state, go, folderById, focusId, setFocus, ensureFolder, manageSubjects } from '../app.js';
 import { esc, icon, timeAgo, debounce, pct, $$, promptBox, toast } from '../util.js';
 import { loadStats, dailyActivity } from '../stats.js';
 import { areaChart } from '../chart.js';
@@ -43,6 +43,7 @@ export async function render(el) {
           <button class="chip ${!filter ? 'active' : ''}" data-f="" role="radio" aria-checked="${!filter}">${filter ? '' : '<span class="swatch" style="background:var(--good)"></span>'}All subjects</button>
           ${state.folders.map((f) => `<button class="chip ${filter === f.id ? 'active' : ''}" data-f="${f.id}" role="radio" aria-checked="${filter === f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}
           <button class="chip" data-act="add-subject" title="Add a subject">${icon('plus')} Subject</button>
+          ${state.folders.length ? `<button class="chip" data-act="edit-subjects" title="Rename or delete subjects">${icon('edit')} Edit</button>` : ''}
         </div>
         <button class="btn dark" id="new-btn">${icon('plus')}<span>New</span></button>
       </div>
@@ -145,6 +146,7 @@ export async function render(el) {
       if (a.dataset.act === 'up-notes') { const fl = await pickFiles(); if (fl.length && (await importAsNotes(fl)).length) render(el); }
       if (a.dataset.act === 'add-file') { const fl = await pickFiles(); if (fl.length && (await importToLibrary(fl)).length) render(el); }
       if (a.dataset.act === 'gen') openSourcePicker('quiz');
+      if (a.dataset.act === 'edit-subjects') return manageSubjects(() => render(el));
       if (a.dataset.act === 'add-subject') {
         const name = await promptBox({ title: 'Add a subject', label: 'What are you studying? (e.g. Anatomy, Accounting 2)', confirmText: 'Add & study' });
         if (name) { await setFocus(await ensureFolder(name)); render(el); }

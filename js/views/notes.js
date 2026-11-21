@@ -1,5 +1,5 @@
 import { db } from '../store.js';
-import { state, go, setCrumb, folderById, refreshFolders, focusId } from '../app.js';
+import { state, go, setCrumb, folderById, refreshFolders, focusId, manageSubjects } from '../app.js';
 import { esc, icon, timeAgo, debounce, toast, confirmBox, promptBox, modal, SWATCHES, $$ } from '../util.js';
 import { renderMd } from '../md.js';
 import { importAsNotes, bindDropzone, openGenerator } from '../create.js';
@@ -24,7 +24,7 @@ export async function render(el, [noteId]) {
       <div class="chips" id="folders">
         <button class="chip ${!folderFilter ? 'active' : ''}" data-f="">All</button>
         ${state.folders.map((f) => `<button class="chip ${folderFilter === f.id ? 'active' : ''}" data-f="${f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}
-        <button class="chip" id="manage" title="Manage subjects">${icon('folder')} Subjects</button>
+        <button class="chip" id="manage" title="Rename or delete subjects">${icon('edit')} Edit subjects</button>
       </div>
       <div class="list notes-list" id="list"></div>
     </div>
@@ -51,7 +51,7 @@ export async function render(el, [noteId]) {
     const f = e.target.closest('[data-f]');
     if (f) { folderFilter = f.dataset.f; $$('#folders .chip').forEach((c) => c.classList.toggle('active', c === f)); drawList(); }
   });
-  el.querySelector('#manage').addEventListener('click', () => manageFolders(() => render(el, [noteId])));
+  el.querySelector('#manage').addEventListener('click', () => manageSubjects(() => render(el, [noteId])));
   const newNote = async () => { const n = await db.insert('notes', { title: 'Untitled note', content: '', folder_id: folderFilter || focusId() }); go(`#/notes/${n.id}`); };
   el.querySelector('#new').addEventListener('click', newNote);
   el.querySelector('#new2')?.addEventListener('click', newNote);
@@ -178,28 +178,5 @@ function bindEditor(el, note, notes, drawList) {
         await db.remove('notes', note.id); toast('Note deleted'); go('#/notes');
       }
     });
-  });
-}
-
-function manageFolders(after) {
-  const draw = () => `<div class="stack">
-    ${state.folders.length ? state.folders.map((f) => `<div class="row gap" data-id="${f.id}"><span style="width:14px;height:14px;border-radius:50%;background:${esc(f.color)}"></span><span class="grow">${esc(f.name)}</span>
-      <button class="icon-btn sm" data-a="ren" aria-label="Rename">${icon('edit')}</button><button class="icon-btn sm" data-a="del" aria-label="Delete">${icon('trash')}</button></div>`).join('') : '<p class="muted small">No subjects yet. They\'re created automatically when you upload notes.</p>'}
-    <button class="btn" id="add">${icon('plus')} Add subject</button>
-    <p class="tiny dim">Deleting a subject keeps its notes, decks and quizzes — they just become unfiled.</p></div>`;
-  const m = modal({ title: 'Subjects', body: draw(), onClose: after });
-  const body = m.el.querySelector('.modal-body');
-  body.addEventListener('click', async (e) => {
-    if (e.target.closest('#add')) {
-      const name = await promptBox({ title: 'New subject', label: 'Name' });
-      if (name) { await db.insert('folders', { name, color: SWATCHES[state.folders.length % SWATCHES.length] }); await refreshFolders(); body.innerHTML = draw(); }
-      return;
-    }
-    const row = e.target.closest('[data-id]'); const a = e.target.closest('[data-a]')?.dataset.a;
-    if (!row || !a) return;
-    const f = folderById(row.dataset.id);
-    if (a === 'ren') { const name = await promptBox({ title: 'Rename subject', label: 'Name', value: f.name }); if (name) await db.update('folders', f.id, { name }); }
-    if (a === 'del' && await confirmBox({ title: `Delete “${f.name}”?`, message: 'Items inside are kept but unfiled.' })) { await db.remove('folders', f.id); if (folderFilter === f.id) folderFilter = ''; }
-    await refreshFolders(); body.innerHTML = draw();
   });
 }

@@ -7,7 +7,9 @@ A study dashboard that runs on phones, tablets and laptops:
 - **Flashcards** — generated from notes/PDFs or written by hand. Spaced-repetition review (Again / Hard / Good / Easy) brings each card back right before you'd forget it.
 - **Quizzes & exams** — multiple choice, true/false, fill-in-the-blank and short answer. Quizzes give instant feedback; exams are timed and graded at the end. Review mistakes, practise only the missed questions, edit or delete generated questions.
 - **Studying a subject** — pick the subject you're studying on the dashboard (or add a new one). New uploads, notes, decks and quizzes go into it, and lists filter to it. Choose *All subjects* to let StudyDeck sort uploads automatically.
-- **Learn mode** — Quizlet-style retention for decks and quizzes: rounds of 7; a missed item comes back a few questions later until you get it right; every item must be answered correctly twice (flashcards: multiple choice first, then recall), so the ones you know come back too. Results feed the spaced-repetition schedule.
+- **Uses your file's own questions** — if an uploaded PDF/Word file is already a quiz, reviewer or question bank (numbered questions, a/b/c/d choices, "Answer:" lines or an answer key at the end), StudyDeck imports those exact questions and answers instead of inventing new ones. Questions without an answer in the file can be completed in *Review & edit questions*.
+- **Learn mode** — retention-first, in batches of 5 or 10. Inside a batch every item comes back until you've got it right twice (missed ones return sooner). After each batch, items from earlier batches come back for a retention check — even ones you got right — and anything forgotten is re-learned. A final retention check covers everything. No item limit. Results feed the spaced-repetition schedule.
+- **Subjects** — rename, recolour or delete subjects from the dashboard (Edit chip), Notes, Flashcards, Quizzes or Settings. Deleting asks whether to keep or delete what's inside.
 - **Up to 200 items** per generated deck/quiz/exam and per study session.
 - **Write & export** — a writing card on the dashboard (and an export option on every note) downloads your notes as **PDF** or **Word (.docx)**, with headings, bullets, numbered lists, bold and italic.
 - **Progress** — streak, daily activity, recall rate, mastery per deck, quiz score trend.
@@ -23,6 +25,7 @@ Plain HTML/CSS/JavaScript modules — **no build step**. Vercel serves the folde
 | Data layer (Supabase **or** in-browser IndexedDB) | `js/store.js` |
 | File → text (PDF via pdf.js, DOCX/PPTX via a tiny zip reader) | `js/extract.js`, `vendor/` |
 | Offline flashcard / question generator | `js/generator.js` |
+| Import existing questions from a file | `js/importq.js` |
 | Spaced repetition | `js/srs.js` |
 | Learn mode (retention rounds) | `js/views/learn.js` |
 | PDF / Word export | `js/export.js`, `vendor/pdf-lib/` |

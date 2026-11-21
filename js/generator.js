@@ -23,14 +23,20 @@ export function splitSentences(text) {
       .reduce((acc, l) => {
         const prev = acc[acc.length - 1];
         // start a new chunk after bullets/headings/finished sentences and after short title-like lines
-        if (!acc.length || /^([-*•#]|\d+[.)])\s/.test(l) || /[.!?:]$/.test(prev) || prev.length < 50 || /^[\w'’()\/ -]{2,50}:\s/.test(l)) acc.push(l);
+        // …but a line that obviously continues the previous one (wrapped PDF text) is joined back
+        const continues = prev && !/[.!?:]$/.test(prev) && (/^[a-z(]/.test(l) || /[,;–-]$/.test(prev) || STOP.has(prev.split(/\s+/).pop().toLowerCase()));
+        if (!continues && (!acc.length || /^([-*•#]|\d+[.)])\s/.test(l) || /[.!?:]$/.test(prev) || prev.length < 50 || /^[\w'’()\/ -]{2,50}:\s/.test(l))) acc.push(l);
         else acc[acc.length - 1] += ' ' + l;
         return acc;
       }, []);
     for (const para of joined) {
       if (/^#/.test(para)) continue;
       const parts = para.match(/[^.!?]+(?:[.!?]+(?=\s+[A-Z0-9"'(])|[.!?]+$|$)/g) || [para];
-      for (const p of parts) { const s = clean(p); if (words(s).length >= 4) out.push(s); }
+      for (const p of parts) {
+        const s = clean(p);
+        // skip fragments cut off mid-sentence ("…is fixed, while the")
+        if (words(s).length >= 4 && !STOP.has((s.replace(/[.!?:]+$/, '').split(/\s+/).pop() || '').toLowerCase())) out.push(s);
+      }
     }
   }
   return out;

@@ -15,7 +15,7 @@ export async function render(el, [deckId]) {
       <span class="grow"></span>
       <div class="row gap"><button class="btn" id="new-deck">${icon('plus')} Empty deck</button><button class="btn primary" id="gen">${icon('sparkle')} Generate</button></div></div>
     ${totalDue ? `<div class="card hl row gap wrap" style="margin-bottom:18px"><span class="item-ico big">${icon('flame')}</span><div class="grow"><h3>${totalDue} card${totalDue > 1 ? 's' : ''} due across all decks</h3><p class="small muted">A quick review now keeps your streak going.</p></div><a class="btn primary" href="#/study/all">${icon('play')} Review all</a></div>` : ''}
-    ${state.folders.length ? `<div class="chips" style="margin-bottom:16px"><span class="small muted" style="align-self:center">Studying:</span><button class="chip ${!fid ? 'active' : ''}" data-f="">All</button>${state.folders.map((f) => `<button class="chip ${fid === f.id ? 'active' : ''}" data-f="${f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}</div>` : ''}
+    ${state.folders.length ? `<div class="chips" style="margin-bottom:16px"><span class="small muted" style="align-self:center">Studying:</span><button class="chip ${!fid ? 'active' : ''}" data-f="">All</button>${state.folders.map((f) => `<button class="chip ${fid === f.id ? 'active' : ''}" data-f="${f.id}"><span class="swatch" style="background:${esc(f.color)}"></span>${esc(f.name)}</button>`).join('')}<button class="chip" data-edit-subjects>${icon('edit')} Edit</button></div>` : ''}
     <div class="grid cards">
       ${shown.map((d) => {
         const cs = cards.filter((c) => c.deck_id === d.id); const due = cs.filter(isDue).length; const m = pct(cs.filter(isMastered).length, cs.length);
@@ -30,6 +30,7 @@ export async function render(el, [deckId]) {
   </div>`;
   const root = el.firstElementChild;
   root.addEventListener('click', async (e) => {
+    if (e.target.closest('[data-edit-subjects]')) { const { manageSubjects } = await import('../app.js'); return manageSubjects(() => render(el, [])); }
     const f = e.target.closest('[data-f]'); if (f) { await setFocus(f.dataset.f || null); return render(el, []); }
     const s = e.target.closest('[data-study]'); if (s) { e.stopPropagation(); return go(`#/study/${s.dataset.study}`); }
     const l = e.target.closest('[data-learn]'); if (l) { e.stopPropagation(); return go(`#/learn/deck/${l.dataset.learn}`); }
