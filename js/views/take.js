@@ -2,6 +2,7 @@ import { db } from '../store.js';
 import { state, go, setCrumb, subjectSelectHtml, bindSubjectSelect } from '../app.js';
 import { esc, icon, pct, shuffle, timeAgo, toast, modal, confirmBox } from '../util.js';
 import { grade } from '../generator.js';
+import { applyAnswerKey } from '../importq.js';
 import { ring } from '../chart.js';
 
 const TYPE_LABEL = { mcq: 'Multiple choice', tf: 'True or false', fill: 'Fill in the blank', short: 'Short answer' };
@@ -46,7 +47,7 @@ async function intro(el, quiz) {
     const n = Number(el.querySelector('#howmany').value) || quiz.questions.length;
     if (!answerable.length) return toast('Set the answers first in “Review & edit questions”', 'err');
     const qs = (el.querySelector('#shuf').checked ? shuffle(answerable) : answerable).slice(0, n);
-    run(el, quiz, qs.map((q) => ({ ...q, options: q.type === 'mcq' ? shuffle(q.options || []) : q.options })), true);
+    run(el, quiz, qs.map((q) => ({ ...q, options: q.type === 'mcq' && q.number == null ? shuffle(q.options || []) : q.options })), true);
   });
   el.querySelector('#edit').addEventListener('click', () => editQuestions(el, quiz));
   el.querySelector('#fix')?.addEventListener('click', (e) => { e.preventDefault(); editQuestions(el, quiz); });
@@ -207,13 +208,24 @@ function showResults(el, quiz, questions, answers, results, duration, attempt) {
 }
 
 function editQuestions(el, quiz) {
-  const draw = () => `<div class="stack">${quiz.questions.map((q, k) => `<div class="card" style="padding:14px">
+  const draw = () => `<div class="stack">
+    <div class="card" style="padding:14px;border-color:rgba(79,124,255,.4)"><div class="row gap wrap"><b class="small grow">Answer key</b><span class="tiny muted">${quiz.questions.filter((q) => q.answer == null || q.answer === '').length} without an answer</span></div>
+      <textarea class="textarea" id="akey" rows="2" style="margin-top:8px" placeholder="Type or paste: 1.B 2.C 3.A 4.True …  or just BCATD…"></textarea>
+      <div class="row end" style="margin-top:8px"><button class="btn sm primary" id="akey-go">Apply key</button></div></div>
+    ${quiz.questions.map((q, k) => `<div class="card" style="padding:14px">
       <div class="row gap" style="align-items:flex-start"><div class="grow"><div class="tiny muted">${k + 1} · ${TYPE_LABEL[q.type]}</div><div class="small" style="white-space:pre-line;margin-top:4px">${esc(q.prompt)}</div>
       ${q.answer != null && q.answer !== '' ? `<div class="tiny" style="margin-top:6px;color:var(--good)">✓ ${esc(q.answer)}</div>` : '<div class="tiny" style="margin-top:6px;color:#ffd38a">No answer yet — tap edit to set it</div>'}</div>
       <button class="icon-btn sm" data-e="${k}" aria-label="Edit">${icon('edit')}</button><button class="icon-btn sm" data-d="${k}" aria-label="Delete">${icon('trash')}</button></div></div>`).join('')}</div>`;
   const m = modal({ title: `Questions (${quiz.questions.length})`, wide: true, body: draw(), onClose: () => intro(el, quiz) });
   const body = m.el.querySelector('.modal-body');
   body.addEventListener('click', async (e) => {
+    if (e.target.closest('#akey-go')) {
+      const n = applyAnswerKey(quiz.questions, body.querySelector('#akey').value);
+      if (!n) return toast('Couldn\'t read that key — try “1.B 2.C 3.A”', 'err');
+      await db.update('quizzes', quiz.id, { questions: quiz.questions });
+      toast(`Set ${n} answer${n > 1 ? 's' : ''}`, 'ok'); body.innerHTML = draw();
+      return;
+    }
     const d = e.target.closest('[data-d]');
     if (d) {
       if (quiz.questions.length <= 1) return toast('A quiz needs at least one question', 'err');

@@ -29,24 +29,117 @@ export async function extractText(file, onProgress = () => {}) {
 async function extractPdf(file, onProgress) {
   const lib = await loadPdfJs();
   const pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
-  const out = [];
+  const pages = [], heights = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     const page = await pdf.getPage(i);
+    const vp = page.getViewport({ scale: 1 });
     const tc = await page.getTextContent();
-    let line = '', lines = [], lastY = null;
-    for (const it of tc.items) {
-      const y = it.transform ? Math.round(it.transform[5]) : null;
-      if (lastY !== null && y !== null && Math.abs(y - lastY) > 2 && line) { lines.push(line); line = ''; }
-      line += it.str;
-      if (it.hasEOL) { lines.push(line); line = ''; }
-      lastY = y;
-    }
-    if (line) lines.push(line);
-    out.push(lines.join('\n'));
+    pages.push(layoutPage(tc.items, vp.width, vp.height));
+    heights.push(vp.height);
     onProgress(i / pdf.numPages);
   }
+  const cleaned = dropRepeatedMargins(pages, heights);
   // pages are separated by a form-feed so the app can pick page ranges later
-  return { text: out.map(tidy).join('\n\f\n'), pages: pdf.numPages };
+  return { text: cleaned.map((ls) => tidy(ls.map((l) => l.text).join('\n'))).join('\n\f\n'), pages: pdf.numPages };
+}
+
+/**
+ * Rebuilds reading order from positioned text pieces:
+ * - skips rotated text (diagonal watermarks) and oversized decorative titles
+ * - detects two-column layouts and reads the left column before the right
+ * - puts spaces between pieces that sit apart on the same line ("a." + "Femur")
+ */
+function layoutPage(raw, W, H) {
+  let items = raw.filter((it) => it.str && it.str.trim() && it.transform).map((it) => {
+    const [a, b, c, d, x, y] = it.transform;
+    const h = Math.hypot(c, d) || it.height || 10;
+    return { s: it.str, x, y, w: it.width || it.str.length * h * 0.5, h, rotated: Math.abs(b) > 0.05 * Math.abs(a || 1) || Math.abs(c) > 0.05 * Math.abs(d || 1) };
+  });
+  items = items.filter((it) => !it.rotated);
+  if (!items.length) return [];
+  const hs = items.map((it) => it.h).sort((p, q) => p - q);
+  const body = hs[Math.floor(hs.length / 2)];
+  items = items.filter((it) => it.h <= body * 2.3); // giant banner titles / watermark letters
+  // superscripts/subscripts (90⁰, H₂O): snap them onto the line of the text they follow
+  const normal = items.filter((it) => it.h >= body * 0.8);
+  for (const it of items) {
+    if (it.h >= body * 0.8) continue;
+    const host = normal.find((n) => Math.abs(n.x + n.w - it.x) < body * 0.6 && Math.abs(n.y - it.y) < body);
+    if (host) {
+      const up = it.y > host.y;
+      const map = up ? '⁰¹²³⁴⁵⁶⁷⁸⁹' : '₀₁₂₃₄₅₆₇₈₉';
+      it.s = it.s.replace(/\d/g, (dg) => map[dg]).replace(/\+/g, up ? '⁺' : '₊').replace(/-/g, up ? '⁻' : '₋');
+      it.y = host.y; it.h = host.h; it.sup = true;
+    }
+  }
+
+  // ---- column detection: the right column has a left edge many lines start from,
+  // and (almost) no text crosses it
+  let split = null;
+  const narrow = items.filter((it) => it.w < W * 0.48);
+  const starts = new Map();
+  for (const it of narrow) if (it.x > W * 0.3 && it.x < W * 0.72) { const k = Math.round(it.x / 3) * 3; starts.set(k, (starts.get(k) || 0) + 1); }
+  const edges = [...starts.entries()].filter(([, n]) => n >= 4).map(([x]) => x).sort((p, q) => p - q);
+  for (const e of edges) {
+    const cut = e - 2;
+    const leftN = narrow.filter((it) => it.x + it.w <= cut + 1).length;
+    const rightN = narrow.filter((it) => it.x >= cut).length;
+    const crossing = narrow.filter((it) => it.x < cut && it.x + it.w > cut + 2).length;
+    if (leftN >= 8 && rightN >= 8 && crossing <= Math.max(1, rightN * 0.05)) { split = cut; break; }
+  }
+  const lineOf = (group) => {
+    group.sort((p, q) => (Math.abs(q.y - p.y) > Math.min(p.h, q.h) * 0.45 ? q.y - p.y : p.x - q.x));
+    const lines = [];
+    for (const it of group) {
+      const ln = lines[lines.length - 1];
+      const small = ln && it.h < ln.h * 0.8 && Math.abs(ln.y - it.y) < ln.h * 0.8 && it.x >= ln.end - 1; // superscript / subscript (90⁰, H₂O)
+      if (ln && (small || Math.abs(ln.y - it.y) <= Math.min(ln.h, it.h) * 0.45)) {
+        const gap = it.x - ln.end;
+        ln.text += (!small && !it.sup && gap > it.h * 0.12 && !/\s$/.test(ln.text) && !/^\s/.test(it.s) ? ' ' : '') + it.s;
+        ln.end = Math.max(ln.end, it.x + it.w);
+      } else lines.push({ text: it.s, y: it.y, h: it.h, end: it.x + it.w });
+    }
+    return lines;
+  };
+  if (split === null) return lineOf(items);
+  // everything above the first numbered item (title block, name/score lines) is a header read first;
+  // full-width pieces below it go after the columns
+  const numbered = items.filter((it) => /^\s*\d{1,3}\s*[.)](\s|$)/.test(it.s));
+  const headerY = numbered.length >= 2 ? Math.max(...numbered.map((it) => it.y)) + body * 0.6 : Infinity;
+  const head = items.filter((it) => it.y > headerY);
+  const rest = items.filter((it) => it.y <= headerY);
+  const spans = (it) => it.x < split - 2 && it.x + it.w > split + 2;
+  const cols = rest.filter((it) => !spans(it));
+  const mid = cols.length ? cols.map((it) => it.y).sort((p, q) => p - q)[Math.floor(cols.length / 2)] : 0;
+  const wide = rest.filter(spans);
+  return [
+    ...lineOf(head),
+    ...lineOf(wide.filter((it) => it.y >= mid && it.y > Math.max(...cols.map((c) => c.y), -Infinity))),
+    ...lineOf(cols.filter((it) => it.x + it.w / 2 < split)),
+    ...lineOf(cols.filter((it) => it.x + it.w / 2 >= split)),
+    ...lineOf(wide.filter((it) => !(it.y >= mid && it.y > Math.max(...cols.map((c) => c.y), -Infinity)))),
+  ];
+}
+
+/** Removes running headers/footers, page numbers and fill-in form lines (Name: ____). */
+function dropRepeatedMargins(pages, heights) {
+  const key = (t) => t.toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
+  // only lines in the top 14% / bottom 8% of a page can be running headers or footers
+  const inMargin = (l, H) => (l.y > H * 0.88 || l.y < H * 0.055) && !/^\s*([a-hA-H]|\d{1,3})[.)]\s/.test(l.text); // never drop choices / numbered items
+  const count = new Map();
+  pages.forEach((ls, i) => new Set(ls.filter((l) => inMargin(l, heights[i])).map((l) => key(l.text))).forEach((k) => count.set(k, (count.get(k) || 0) + 1)));
+  const minRepeat = pages.length >= 3 ? Math.ceil(pages.length * 0.5) : 2;
+  return pages.map((ls, i) => ls.filter((l) => {
+    const t = l.text.trim();
+    if (pages.length > 1 && inMargin(l, heights[i]) && count.get(key(t)) >= minRepeat) return false;
+    if (inMargin(l, heights[i]) && /^(page\s*)?\d{1,4}(\s*(of|\/)\s*\d{1,4})?$/i.test(t)) return false;
+    return !isFormLine(t);
+  }));
+}
+
+export function isFormLine(t) {
+  return /^(?:\s*(?:name|school|batch|score|date|section|course|year(?:\s*&\s*section)?|student(?:\s*no\.?)?|id\s*no\.?|instructor|teacher|class|group|rating|signature)\s*:?\s*_{2,}\s*)+$/i.test(t)
+    || /^[_\s.:-]{4,}$/.test(t);
 }
 
 // ---- minimal ZIP reader (DOCX/PPTX are zip files) using the browser's DecompressionStream
